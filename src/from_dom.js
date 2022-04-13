@@ -299,7 +299,7 @@ function wsOptionsFor(type, preserveWhitespace, base) {
 }
 
 class NodeContext {
-  constructor(type, attrs, marks, pendingMarks, solid, match, options) {
+  constructor(type, attrs, marks, pendingMarks, vvv, solid, match, options) {
     this.type = type
     this.attrs = attrs
     this.solid = solid
@@ -314,6 +314,8 @@ class NodeContext {
     this.pendingMarks = pendingMarks
     // Nested Marks with same type
     this.stashMarks = []
+    // Marks stack
+    this.vvv = vvv
   }
 
   findWrapping(node) {
@@ -354,16 +356,23 @@ class NodeContext {
       if (mark.eq(this.stashMarks[i])) return this.stashMarks.splice(i, 1)[0]
   }
 
-  applyPending(nextType, stackMarks) {
-    if (stackMarks) this.pendingMarks = mergeStackMarks(stackMarks)
+  applyPending(nextType, useStack) {
+    console.log('%c@@ apply', 'color: orange', v(this.activeMarks), v(this.pendingMarks), nextType);
+    if (useStack) this.pendingMarks = this.vvv.top[1]
     for (let i = 0, pending = this.pendingMarks; i < pending.length; i++) {
+      console.log('==1', v(this.activeMarks), v(this.pendingMarks));
       let mark = pending[i]
       if ((this.type ? this.type.allowsMarkType(mark.type) : markMayApply(mark.type, nextType)) &&
-          !mark.isInSet(this.activeMarks)) {
+      !mark.isInSet(this.activeMarks)) {
         this.activeMarks = mark.addToSet(this.activeMarks)
         this.pendingMarks = mark.removeFromSet(this.pendingMarks)
       }
+      console.log('==0', v(this.activeMarks), v(this.pendingMarks));
     }
+    if (useStack) {
+      this.vvv.top = [this.activeMarks, this.pendingMarks];
+    }
+    if (useStack) console.log('!!!', v(this.vvv))
   }
 
   inlineContext(node) {
@@ -384,19 +393,20 @@ class ParseContext {
     let topNode = options.topNode, topContext
     let topOptions = wsOptionsFor(null, options.preserveWhitespace, 0) | (open ? OPT_OPEN_LEFT : 0)
     if (topNode)
-      topContext = new NodeContext(topNode.type, topNode.attrs, Mark.none, Mark.none, true,
+      topContext = new NodeContext(topNode.type, topNode.attrs, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]), true,
                                    options.topMatch || topNode.type.contentMatch, topOptions)
     else if (open)
-      topContext = new NodeContext(null, null, Mark.none, Mark.none, true, null, topOptions)
+      topContext = new NodeContext(null, null, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]), true, null, topOptions)
     else
-      topContext = new NodeContext(parser.schema.topNodeType, null, Mark.none, Mark.none, true, null, topOptions)
+      topContext = new NodeContext(parser.schema.topNodeType, null, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]),
+                                   true, null, topOptions)
     this.nodes = [topContext]
 
     // : [Mark] The current set of marks
     this.open = 0
     this.find = options.findPositions
     this.needsBlock = false
-    this.stackMarks = options.useStack ? [] : null
+    this.useStack = options.useStack
   }
 
   get top() {
@@ -413,14 +423,17 @@ class ParseContext {
     } else if (dom.nodeType == 1) {
       let style = dom.getAttribute("style")
       let marks = style ? this.readStyles(parseStyles(style)) : null, top = this.top
-      if (this.stackMarks) {
-        this.stackMarks.push(marks || [])
-        marks = mergeStackMarks(this.stackMarks)
-      }
+      if (this.useStack) this.top.pendingMarks = this.top.vvv.top[1]
       if (marks != null) for (let i = 0; i < marks.length; i++) this.addPendingMark(marks[i])
+      if (this.useStack) this.top.vvv.push([this.top.activeMarks, this.top.pendingMarks]);
+      console.log('%c@@ add start', 'color: orange', this.open, this.top);
       this.addElement(dom)
+      console.log('%c@@ add end', 'color: orange', this.open, this.top);
       if (marks != null) for (let i = 0; i < marks.length; i++) this.removePendingMark(marks[i], top)
-      if (this.stackMarks) this.stackMarks.pop()
+      if (this.useStack) {
+        this.top.vvv.pop()
+        this.top.activeMarks = this.top.vvv.top[0]
+      }
     }
   }
 
@@ -448,6 +461,7 @@ class ParseContext {
       } else {
         value = value.replace(/\r\n?/g, "\n")
       }
+      if (value) console.log('ADD NODE via Text', value)
       if (value) this.insertNode(this.parser.schema.text(value))
       this.findInText(dom)
     } else {
@@ -522,6 +536,7 @@ class ParseContext {
   // the node's content is wrapped, and return true.
   addElementByRule(dom, rule, continueAfter) {
     let sync, nodeType, markType, mark
+    console.log('ADD NODE By Rule', rule, dom)
     if (rule.node) {
       nodeType = this.parser.schema.nodes[rule.node]
       if (!nodeType.isLeaf) {
@@ -532,8 +547,9 @@ class ParseContext {
     } else {
       markType = this.parser.schema.marks[rule.mark]
       mark = markType.create(rule.attrs)
-      if (this.stackMarks) this.stackMarks.push([mark])
+      if (this.useStack) this.top.pendingMarks = this.top.vvv.top[1]
       this.addPendingMark(mark)
+      if (this.useStack) this.top.vvv.push([this.top.activeMarks, this.top.pendingMarks])
     }
     let startIn = this.top
 
@@ -552,10 +568,19 @@ class ParseContext {
       this.findAround(dom, contentDOM, true)
       this.addAll(contentDOM, sync)
     }
+    if (sync) {
+      let last = this.nodes[this.open - 1];
+      let curr = this.top;
+      console.log('???', v(last.activeMarks), v(last.pendingMarks))
+      console.log('???', v(curr.activeMarks), v(curr.pendingMarks))
+    }
     if (sync) { this.sync(startIn); this.open-- }
     if (mark) {
       this.removePendingMark(mark, startIn)
-      if (this.stackMarks) this.stackMarks.pop()
+      if (this.useStack) {
+        this.top.vvv.pop();
+        this.top.activeMarks = [];
+      }
     }
   }
 
@@ -579,7 +604,7 @@ class ParseContext {
   // Try to find a way to fit the given node type into the current
   // context. May add intermediate wrappers and/or leave non-solid
   // nodes that we're in.
-  findPlace(node) {
+   findPlace(node) {
     let route, sync
     for (let depth = this.open; depth >= 0; depth--) {
       let cx = this.nodes[depth]
@@ -591,6 +616,7 @@ class ParseContext {
       }
       if (cx.solid) break
     }
+    console.log('ROUTE', this.open, route, sync, node)
     if (!route) return false
     this.sync(sync)
     for (let i = 0; i < route.length; i++)
@@ -608,9 +634,11 @@ class ParseContext {
     if (this.findPlace(node)) {
       this.closeExtra()
       let top = this.top
-      top.applyPending(node.type, this.stackMarks)
+      console.log('APPLY insert', v(top.activeMarks), v(top.pendingMarks));
+      top.applyPending(node.type, this.useStack)
       if (top.match) top.match = top.match.matchType(node.type)
       let marks = top.activeMarks
+      console.log('marks', top.activeMarks);
       for (let i = 0; i < node.marks.length; i++)
         if (!top.type || top.type.allowsMarkType(node.marks[i].type))
           marks = node.marks[i].addToSet(marks)
@@ -633,11 +661,13 @@ class ParseContext {
   enterInner(type, attrs, solid, preserveWS) {
     this.closeExtra()
     let top = this.top
-    top.applyPending(type, this.stackMarks)
+    console.log('APPLY enter', v(top.activeMarks), v(top.pendingMarks));
+    top.applyPending(type, this.useStack)
     top.match = top.match && top.match.matchType(type, attrs)
     let options = wsOptionsFor(type, preserveWS, top.options)
     if ((top.options & OPT_OPEN_LEFT) && top.content.length == 0) options |= OPT_OPEN_LEFT
-    this.nodes.push(new NodeContext(type, attrs, top.activeMarks, top.pendingMarks, solid, null, options))
+    console.log('@@ enter', 'color: orange', this.open)
+    this.nodes.push(new NodeContext(type, attrs, top.activeMarks, top.pendingMarks, top.vvv, solid, null, options))
     this.open++
   }
 
@@ -646,7 +676,12 @@ class ParseContext {
   closeExtra(openEnd) {
     let i = this.nodes.length - 1
     if (i > this.open) {
-      for (; i > this.open; i--) this.nodes[i - 1].content.push(this.nodes[i].finish(openEnd))
+      console.log('close and push content', i, this.open)
+      for (; i > this.open; i--) {
+        console.log('XXX', v(this.nodes[i - 1].vvv), v(this.nodes[i].vvv))
+        if (this.useStack) this.nodes[i - 1].vvv.top = this.nodes[i].vvv.top;
+        this.nodes[i - 1].content.push(this.nodes[i].finish(openEnd))
+      }
       this.nodes.length = this.open + 1
     }
   }
@@ -753,15 +788,18 @@ class ParseContext {
   }
 
   addPendingMark(mark) {
+    console.log('###', v(mark))
     let found = findSameMarkInSet(mark, this.top.pendingMarks)
     if (found) this.top.stashMarks.push(found)
     this.top.pendingMarks = mark.addToSet(this.top.pendingMarks)
   }
 
   removePendingMark(mark, upto) {
+    console.log('~~~', v(mark))
     for (let depth = this.open; depth >= 0; depth--) {
       let level = this.nodes[depth]
       let found = level.pendingMarks.lastIndexOf(mark)
+      console.log('--1', found, v(level.activeMarks), v(level.pendingMarks), v(level.stashMarks))
       if (found > -1) {
         level.pendingMarks = mark.removeFromSet(level.pendingMarks)
       } else {
@@ -770,6 +808,7 @@ class ParseContext {
         if (stashMark && level.type && level.type.allowsMarkType(stashMark.type))
           level.activeMarks = stashMark.addToSet(level.activeMarks)
       }
+      console.log('--0', v(level.activeMarks), v(level.pendingMarks), v(level.stashMarks))
       if (level == upto) break
     }
   }
@@ -837,12 +876,34 @@ function findSameMarkInSet(mark, set) {
   }
 }
 
-function mergeStackMarks(stackMarks) {
-  let set = []
-  for (let i = 0; i < stackMarks.length; i++) {
-    for (let j = 0, marks = stackMarks[i]; j < marks.length; j++) {
-      set = marks[j].addToSet(set)
-    }
+class Stack {
+  constructor(initial) {
+    this.stack = initial
   }
-  return set
+
+  get top() {
+    return this.stack[this.stack.length - 1]
+  }
+
+  set top(value) {
+    console.log('%cSSSS', 'color: red', value, v(this.stack.slice(0)))
+    this.stack[this.stack.length - 1] = value
+  }
+
+  push(value) {
+    console.log('%c IN', 'color: red', value, v(this.stack.slice(0)))
+    this.stack.push(value)
+  } 
+
+  pop() {
+    console.log('%c OUT', 'color: red', v(this.stack.slice(0)))
+    return this.stack.pop()
+  }
+}
+
+function v(marks) {
+  if (!marks) return marks;
+  if (marks instanceof Stack) return v(marks.stack);
+  if (!Array.isArray(marks)) return marks.type.name;
+  return marks.map(m => v(m));
 }

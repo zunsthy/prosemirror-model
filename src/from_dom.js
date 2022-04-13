@@ -354,7 +354,8 @@ class NodeContext {
       if (mark.eq(this.stashMarks[i])) return this.stashMarks.splice(i, 1)[0]
   }
 
-  applyPending(nextType) {
+  applyPending(nextType, stackMarks) {
+    if (stackMarks) this.pendingMarks = mergeStackMarks(stackMarks)
     for (let i = 0, pending = this.pendingMarks; i < pending.length; i++) {
       let mark = pending[i]
       if ((this.type ? this.type.allowsMarkType(mark.type) : markMayApply(mark.type, nextType)) &&
@@ -390,10 +391,12 @@ class ParseContext {
     else
       topContext = new NodeContext(parser.schema.topNodeType, null, Mark.none, Mark.none, true, null, topOptions)
     this.nodes = [topContext]
+
     // : [Mark] The current set of marks
     this.open = 0
     this.find = options.findPositions
     this.needsBlock = false
+    this.stackMarks = options.useStack ? [] : null
   }
 
   get top() {
@@ -410,9 +413,14 @@ class ParseContext {
     } else if (dom.nodeType == 1) {
       let style = dom.getAttribute("style")
       let marks = style ? this.readStyles(parseStyles(style)) : null, top = this.top
+      if (this.stackMarks) {
+        this.stackMarks.push(marks || [])
+        marks = mergeStackMarks(this.stackMarks)
+      }
       if (marks != null) for (let i = 0; i < marks.length; i++) this.addPendingMark(marks[i])
       this.addElement(dom)
       if (marks != null) for (let i = 0; i < marks.length; i++) this.removePendingMark(marks[i], top)
+      if (this.stackMarks) this.stackMarks.pop()
     }
   }
 
@@ -524,6 +532,7 @@ class ParseContext {
     } else {
       markType = this.parser.schema.marks[rule.mark]
       mark = markType.create(rule.attrs)
+      if (this.stackMarks) this.stackMarks.push([mark])
       this.addPendingMark(mark)
     }
     let startIn = this.top
@@ -544,7 +553,10 @@ class ParseContext {
       this.addAll(contentDOM, sync)
     }
     if (sync) { this.sync(startIn); this.open-- }
-    if (mark) this.removePendingMark(mark, startIn)
+    if (mark) {
+      this.removePendingMark(mark, startIn)
+      if (this.stackMarks) this.stackMarks.pop()
+    }
   }
 
   // : (dom.Node, ?NodeBuilder, ?number, ?number)
@@ -596,7 +608,7 @@ class ParseContext {
     if (this.findPlace(node)) {
       this.closeExtra()
       let top = this.top
-      top.applyPending(node.type)
+      top.applyPending(node.type, this.stackMarks)
       if (top.match) top.match = top.match.matchType(node.type)
       let marks = top.activeMarks
       for (let i = 0; i < node.marks.length; i++)
@@ -621,7 +633,7 @@ class ParseContext {
   enterInner(type, attrs, solid, preserveWS) {
     this.closeExtra()
     let top = this.top
-    top.applyPending(type)
+    top.applyPending(type, this.stackMarks)
     top.match = top.match && top.match.matchType(type, attrs)
     let options = wsOptionsFor(type, preserveWS, top.options)
     if ((top.options & OPT_OPEN_LEFT) && top.content.length == 0) options |= OPT_OPEN_LEFT
@@ -823,4 +835,14 @@ function findSameMarkInSet(mark, set) {
   for (let i = 0; i < set.length; i++) {
     if (mark.eq(set[i])) return set[i]
   }
+}
+
+function mergeStackMarks(stackMarks) {
+  let set = []
+  for (let i = 0; i < stackMarks.length; i++) {
+    for (let j = 0, marks = stackMarks[i]; j < marks.length; j++) {
+      set = marks[j].addToSet(set)
+    }
+  }
+  return set
 }

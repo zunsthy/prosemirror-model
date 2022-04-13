@@ -20,14 +20,27 @@ describe("DOMParser", () => {
       return dom
     }
 
-    function test(doc, html, document_ = document) {
+    function test(doc, html, mode, document_ = document) {
       return () => {
-        let derivedDOM = document_.createElement("div"), schema = doc.type.schema
-        derivedDOM.appendChild(DOMSerializer.fromSchema(schema).serializeFragment(doc.content, {document: document_}))
-        let declaredDOM = domFrom(html, document_)
+        if (mode === "normal" || !mode) {
+          let derivedDOM = document_.createElement("div"), schema = doc.type.schema
+          derivedDOM.appendChild(DOMSerializer.fromSchema(schema).serializeFragment(doc.content, {document: document_}))
+          let declaredDOM = domFrom(html, document_)
 
-        ist(derivedDOM.innerHTML, declaredDOM.innerHTML)
-        ist(DOMParser.fromSchema(schema).parse(derivedDOM), doc, eq)
+          ist(derivedDOM.innerHTML, declaredDOM.innerHTML)
+          ist(DOMParser.fromSchema(schema).parse(derivedDOM, {}), doc, eq)
+        }
+
+        if (mode === "stack" || !mode) {
+          let derivedDOM = document_.createElement("div"), schema = doc.type.schema
+          derivedDOM.appendChild(DOMSerializer.fromSchema(schema).serializeFragment(doc.content, {document: document_}))
+          let declaredDOM = domFrom(html, document_)
+
+          ist(derivedDOM.innerHTML, declaredDOM.innerHTML)
+          ist(DOMParser.fromSchema(schema).parse(derivedDOM, {
+            useStack: true,
+          }), doc, eq)
+        }
       }
     }
 
@@ -45,7 +58,11 @@ describe("DOMParser", () => {
 
     it("joins styles",
        test(doc(p("one", strong("two", em("three")), em("four"), "five")),
-            "<p>one<strong>two</strong><em><strong>three</strong>four</em>five</p>"))
+            "<p>one<strong>two</strong><em><strong>three</strong>four</em>five</p>", "normal"))
+
+    it("joins styles (stack)",
+       test(doc(p("one", strong("two"), em(strong("three")), em("four"), "five")),
+            "<p>one<strong>two</strong><em><strong>three</strong>four</em>five</p>", "stack"))
 
     it("can represent links",
        test(doc(p("a ", a({href: "foo"}, "big ", a({href: "bar"}, "nested"), " link"))),
@@ -153,7 +170,7 @@ describe("DOMParser", () => {
 
       let b = builders(xmlnsSchema)
       let d = b.doc(b.svg())
-      test(d, "<svg><use href=\"#svg-id\"></use></svg>", xmlDocument)()
+      test(d, "<svg><use href=\"#svg-id\"></use></svg>", '', xmlDocument)()
 
       let dom = xmlDocument.createElement('div')
       dom.appendChild(DOMSerializer.fromSchema(xmlnsSchema).serializeFragment(d.content, {document: xmlDocument}))

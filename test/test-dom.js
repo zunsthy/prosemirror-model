@@ -48,7 +48,7 @@ describe("DOMParser", () => {
             "<p>one<strong>two</strong><em><strong>three</strong>four</em>five</p>"))
 
     it("can represent links",
-       test(doc(p("a ", a({href: "foo"}, "big ", a({href: "bar"}, "nested"), " link"))),
+       test(doc(p("a ", a({href: "foo"}, "big "), a({href: "bar"}, "nested"), a({href: "foo"}, " link"))),
             "<p>a <a href=\"foo\">big </a><a href=\"bar\">nested</a><a href=\"foo\"> link</a></p>"))
 
     it("can represent and unordered list",

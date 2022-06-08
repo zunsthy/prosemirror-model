@@ -44,6 +44,12 @@ export interface ParseOptions {
   /// given [top node](#model.ParseOptions.topNode).
   context?: ResolvedPos
 
+  /// By default, prosemirror `DOMParser` will overwrite the mark
+  /// status when the same mark exists in the nested dom. Keeping all
+  /// marks' status needs to use the stack to stash old status when the
+  /// parser performs a recursive parse.
+  useStack?: boolean
+
   /// @internal
   ruleFromNode?: (node: DOMNode) => Omit<TagParseRule, "tag"> | null
   /// @internal
@@ -341,6 +347,8 @@ class NodeContext {
     readonly marks: readonly Mark[],
     // Marks that can't apply here, but will be used in children if possible
     public pendingMarks: readonly Mark[],
+    // Marks stack, record marks status of parent node
+    public markStack: Stack<[readonly Mark[], readonly Mark[]]>,
     readonly solid: boolean,
     match: ContentMatch | null,
     readonly options: number
@@ -387,7 +395,8 @@ class NodeContext {
       if (mark.eq(this.stashMarks[i])) return this.stashMarks.splice(i, 1)[0]
   }
 
-  applyPending(nextType: NodeType) {
+  applyPending(nextType: NodeType, useStack?: boolean) {
+    if (useStack) this.pendingMarks = this.markStack.top[1]
     for (let i = 0, pending = this.pendingMarks; i < pending.length; i++) {
       let mark = pending[i]
       if ((this.type ? this.type.allowsMarkType(mark.type) : markMayApply(mark.type, nextType)) &&
@@ -396,6 +405,7 @@ class NodeContext {
         this.pendingMarks = mark.removeFromSet(this.pendingMarks)
       }
     }
+    if (useStack) this.markStack.top = [this.activeMarks, this.pendingMarks]
   }
 
   inlineContext(node: DOMNode) {
@@ -410,6 +420,7 @@ class ParseContext {
   find: {node: DOMNode, offset: number, pos?: number}[] | undefined
   needsBlock: boolean
   nodes: NodeContext[]
+  useStack?: boolean
 
   constructor(
     // The parser we are using.
@@ -421,15 +432,17 @@ class ParseContext {
     let topNode = options.topNode, topContext: NodeContext
     let topOptions = wsOptionsFor(null, options.preserveWhitespace, 0) | (isOpen ? OPT_OPEN_LEFT : 0)
     if (topNode)
-      topContext = new NodeContext(topNode.type, topNode.attrs, Mark.none, Mark.none, true,
+      topContext = new NodeContext(topNode.type, topNode.attrs, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]), true,
                                    options.topMatch || topNode.type.contentMatch, topOptions)
     else if (isOpen)
-      topContext = new NodeContext(null, null, Mark.none, Mark.none, true, null, topOptions)
+      topContext = new NodeContext(null, null, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]), true, null, topOptions)
     else
-      topContext = new NodeContext(parser.schema.topNodeType, null, Mark.none, Mark.none, true, null, topOptions)
+      topContext = new NodeContext(parser.schema.topNodeType, null, Mark.none, Mark.none, new Stack([[Mark.none, Mark.none]]), true,
+                                    null, topOptions)
     this.nodes = [topContext]
     this.find = options.findPositions
     this.needsBlock = false
+    this.useStack = options.useStack
   }
 
   get top() {
@@ -450,11 +463,15 @@ class ParseContext {
     let marks = this.readStyles(parseStyles(style))
     if (!marks) return // A style with ignore: true
     let [addMarks, removeMarks] = marks, top = this.top
+    if (this.useStack) this.top.pendingMarks = this.top.markStack.top[1]
     for (let i = 0; i < removeMarks.length; i++) this.removePendingMark(removeMarks[i], top)
     for (let i = 0; i < addMarks.length; i++) this.addPendingMark(addMarks[i])
+    if (this.useStack) this.top.markStack.push([this.top.activeMarks, this.top.pendingMarks])
     f()
+    if (this.useStack) this.top.markStack.pop()
     for (let i = 0; i < addMarks.length; i++) this.removePendingMark(addMarks[i], top)
     for (let i = 0; i < removeMarks.length; i++) this.addPendingMark(removeMarks[i])
+    if (this.useStack) this.top.activeMarks = this.top.markStack.top[0]
   }
 
   addTextNode(dom: Text) {
@@ -576,7 +593,9 @@ class ParseContext {
     } else {
       let markType = this.parser.schema.marks[rule.mark!]
       mark = markType.create(rule.attrs)
+      if (this.useStack) this.top.pendingMarks = this.top.markStack.top[1]
       this.addPendingMark(mark)
+      if (this.useStack) this.top.markStack.push([this.top.activeMarks, this.top.pendingMarks])
     }
     let startIn = this.top
 
@@ -596,7 +615,13 @@ class ParseContext {
       this.addAll(contentDOM)
     }
     if (sync && this.sync(startIn)) this.open--
-    if (mark) this.removePendingMark(mark, startIn)
+    if (mark) {
+      this.removePendingMark(mark, startIn)
+      if (this.useStack) {
+        this.top.markStack.pop()
+        this.top.activeMarks = []
+      }
+    }
   }
 
   // Add all child nodes between `startIndex` and `endIndex` (or the
@@ -644,7 +669,7 @@ class ParseContext {
     if (this.findPlace(node)) {
       this.closeExtra()
       let top = this.top
-      top.applyPending(node.type)
+      top.applyPending(node.type, this.useStack)
       if (top.match) top.match = top.match.matchType(node.type)
       let marks = top.activeMarks
       for (let i = 0; i < node.marks.length; i++)
@@ -668,11 +693,11 @@ class ParseContext {
   enterInner(type: NodeType, attrs: Attrs | null = null, solid: boolean = false, preserveWS?: boolean | "full") {
     this.closeExtra()
     let top = this.top
-    top.applyPending(type)
+    top.applyPending(type, this.useStack)
     top.match = top.match && top.match.matchType(type)
     let options = wsOptionsFor(type, preserveWS, top.options)
     if ((top.options & OPT_OPEN_LEFT) && top.content.length == 0) options |= OPT_OPEN_LEFT
-    this.nodes.push(new NodeContext(type, attrs, top.activeMarks, top.pendingMarks, solid, null, options))
+    this.nodes.push(new NodeContext(type, attrs, top.activeMarks, top.pendingMarks, top.markStack, solid, null, options))
     this.open++
   }
 
@@ -681,7 +706,10 @@ class ParseContext {
   closeExtra(openEnd = false) {
     let i = this.nodes.length - 1
     if (i > this.open) {
-      for (; i > this.open; i--) this.nodes[i - 1].content.push(this.nodes[i].finish(openEnd) as Node)
+      for (; i > this.open; i--) {
+        if (this.useStack) this.nodes[i - 1].markStack.top = this.nodes[i].markStack.top
+        this.nodes[i - 1].content.push(this.nodes[i].finish(openEnd) as Node)
+      }
       this.nodes.length = this.open + 1
     }
   }
@@ -867,5 +895,22 @@ function markMayApply(markType: MarkType, nodeType: NodeType) {
 function findSameMarkInSet(mark: Mark, set: readonly Mark[]) {
   for (let i = 0; i < set.length; i++) {
     if (mark.eq(set[i])) return set[i]
+  }
+}
+
+class Stack<T, S  extends T[] = T[]> {
+  constructor(private stack: S) {
+  }
+  get top() {
+    return this.stack[this.stack.length - 1]
+  }
+  set top(value: T) {
+    this.stack[this.stack.length - 1] = value
+  }
+  push(value: T) {
+    this.stack.push(value)
+  }
+  pop(): T | undefined {
+    return this.stack.pop()
   }
 }
